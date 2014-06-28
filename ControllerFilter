@@ -1,0 +1,192 @@
+package com.kaishengit.core;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+import javax.servlet.FilterChain;
+import javax.servlet.FilterConfig;
+import javax.servlet.ServletException;
+import javax.servlet.ServletRequest;
+import javax.servlet.ServletResponse;
+import javax.servlet.annotation.WebFilter;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+
+import org.dom4j.Document;
+import org.dom4j.Element;
+import org.dom4j.io.SAXReader;
+
+
+/*
+ * 新建 filter而不是class类(即该类是filter,中央控制器)
+ * 继承自AbstractFilter(适配器 模式)
+ * 所有请求都经过该方法
+ * 方磊
+ * */
+@WebFilter("/*")
+public class ControllerFilter extends AbstractFilter{
+	
+	private Map<String,ActionNode> configMap = new HashMap<String, ActionNode>();
+	
+	@Override
+	public void doFilter(ServletRequest req, ServletResponse resp, FilterChain chain) throws IOException, ServletException {
+		HttpServletRequest request = (HttpServletRequest) req;
+		HttpServletResponse response = (HttpServletResponse) resp;
+		
+		//1.获取请求的URL,如 /save.action
+		String url = request.getRequestURI();
+		
+		//判断此url是否以.action结束
+		if (url.endsWith(".action")) {
+			//截取字符串,获取save
+			url = url.substring(1,url.lastIndexOf(".action"));
+			
+			//判断请求的url是否在<action>中(如url是否是<action>中的name属性)
+			if (configMap.containsKey(url)) {
+				//根据请求(截取后的url)获取完全限定名(com.kaishengit.action.HelloAction)
+				//根据key取出action对象
+				ActionNode actionNode = configMap.get(url);
+				//根据action实体类对象取出class属性的值(完全限定名)
+				String className = actionNode.getClassName();
+				
+				//根据class属性的值(完全限定名)进行反射
+				try {
+					//根据完全限定名获取对应的对象(clazz可以拿到其方法等)
+					Class<?> clazz = Class.forName(className);
+					//2.根据url找到对应的Action类;借助于config.xml;获取action类的完全限定名进行反射，获得Action类的实例
+					Object obj = clazz.newInstance();
+					//判断obj是否是HelloAction类的对象
+					//System.out.println(obj instanceof HelloAction);
+					//获得配置文件中的方法名字
+					Method method = clazz.getMethod(actionNode.getMethodName());
+					//3.执行Action类中的execute()方法(根据反射),并获得execute()方法的返回值
+					String result = (String) method.invoke(obj);
+					//System.out.println(result);
+					//获取<result>节点
+					List<ResultNode> ResultNodeList = actionNode.getResultNodeList();
+					
+					ResultNode resultNode = null;
+					//4.根据返回值找到对应的jsp页面
+					for (ResultNode rn : ResultNodeList) {
+						//<result>节点中的name属性值与返回结果进行比较
+						if (rn.getName().equals(result)) {
+							resultNode = rn;
+							break;
+						}
+					}
+					//返回结果未在配置文件中配置
+					if (resultNode == null) {
+						response.sendError(404,"返回值不存在");
+					} else {
+						//返回结果在配置文件中配置
+						String type = resultNode.getType();
+						String path = resultNode.getPath();
+						if (type == null) {
+							//作出响应 (请求转发跳转)
+							request.getRequestDispatcher(path).forward(request, response);	
+						} else if(type.equals("redirect")){
+							//重定向跳转
+							response.sendRedirect(path);
+						}
+					}
+				} catch (Exception e) {
+					e.printStackTrace();
+				}
+			} else {
+				response.sendError(404,"请求路径不存在");
+			}
+		} else {
+			//不是以.action结尾放行不处理
+			chain.doFilter(request, response);
+		}	
+	}
+	
+	
+	/*
+	 * 多次访问但只读取一次config.xml文件
+	 * 服务器启动时执行该方法
+	 * 读取结果为了在doFilter方法中使用,借助实体类
+	 * 执行结果封装到实体类中(为了在doFilter方法中使用)
+	 * 需借助ActionNode和ResultNode与上面方法建立联系
+	 * */
+	@Override
+	public void init(FilterConfig arg0) throws ServletException {
+		//判断是否只读一次
+		//System.out.println("Read xml...");
+		//读取配置文件
+		InputStream in = ControllerFilter.class.getClassLoader().getResourceAsStream("config.xml");
+		
+		SAXReader saxReader = new SAXReader();
+		
+		try {
+			//获取Document实例
+			Document doc = saxReader.read(in);
+			//获取配置文件的根节点 <config> </config>
+			Element rootElement = doc.getRootElement();
+			
+			//根据根节点获取所有<action></action>节点；返回List
+			List<Element> actionElements = rootElement.elements("action");
+			//根据每个<action>节点获取其属性
+			for (Element actionElement : actionElements) {
+				//循环一次产生一个action对象
+				ActionNode actionNode = new ActionNode();
+				//获取节点属性:
+				//获取name属性
+				String name = actionElement.attributeValue("name");
+				//获取class属性
+				String className = actionElement.attributeValue("class");
+				//获取方法名
+				String methodName = actionElement.attributeValue("method");
+				
+				//封装
+				actionNode.setName(name);
+				actionNode.setClassName(className);
+				
+				if (methodName != null) {
+					actionNode.setMethodName(methodName);
+				} else {
+					//配置文件中无method属性(只配置到了类级别默认执行executefangfa)
+					actionNode.setMethodName("execute");
+				}
+				
+				//<action>节点下面的<result>节点放入该集合中
+				List<ResultNode> resultNodeList = new ArrayList<ResultNode>();
+				
+				//根据<action>节点,获取其下的所有<result>节点
+				List<Element> resultElements = actionElement.elements("result");
+				
+				//循环获得<result>节点的属性值
+				for (Element resultElement : resultElements) {
+					ResultNode resultNode = new ResultNode();
+					
+					//获取<result>节点的属性值
+					String resultname = resultElement.attributeValue("name");
+					String resultType = resultElement.attributeValue("type");
+					
+					//获取<result>节点中的文本子节点的值
+					String path = resultElement.getText();
+					
+					//将<result>节点属性进行封装
+					resultNode.setName(resultname);;
+					resultNode.setType(resultType);
+					resultNode.setPath(path);
+					//每个result节点属性及文本子节点的值添加到List集合中
+					resultNodeList.add(resultNode);
+				}
+				//封装集合
+				actionNode.setResultNodeList(resultNodeList);
+				
+				//把action对象放入Map集合中(键:action中的name属性值;值:action对象)
+				configMap.put(name, actionNode);
+			}
+			in.close();
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+	}
+}
